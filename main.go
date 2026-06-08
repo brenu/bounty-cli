@@ -16,6 +16,8 @@ import (
 	"github.com/brenu/bounty-cli/internal/tools"
 )
 
+const nucleiResultsFile = "nuclei_results.jsonl"
+
 type stringList []string
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }
@@ -279,11 +281,10 @@ func main() {
 
 	if len(liveHosts) > 0 {
 		fmt.Println("[*] Starting Nuclei Scan...")
-		nucleiOut := "nuclei_results.jsonl"
-		tools.RunNuclei(liveHosts, nucleiOut, rps)
+		tools.RunNuclei(liveHosts, nucleiResultsFile, rps)
 
 		var err error
-		allFindings, err = reporter.ParseNucleiOutput(nucleiOut)
+		allFindings, err = reporter.ParseNucleiOutput(nucleiResultsFile)
 		if err != nil {
 			fmt.Printf("Error parsing nuclei output: %v\n", err)
 		}
@@ -332,6 +333,12 @@ func main() {
 			if err := analyst.AnalyseReport(reportPath, cfg); err != nil {
 				fmt.Printf("[!] LLM analysis error: %v\n", err)
 			}
+		}
+	}
+
+	if len(liveHosts) > 0 {
+		if err := os.Remove(nucleiResultsFile); err != nil && !os.IsNotExist(err) {
+			fmt.Printf("[!] Failed to remove %s: %v\n", nucleiResultsFile, err)
 		}
 	}
 

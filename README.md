@@ -69,7 +69,7 @@ Skip the Intigriti API and treat a domain or wildcard as in scope:
 
 ### Scan explicit FQDNs
 
-Provide a fixed list of hosts. This skips Intigriti and recon entirely:
+Provide a fixed list of hosts. This skips Intigriti. Recon is skipped by default but can be enabled with `--skip-recon=false`:
 
 ```bash
 ./bounty_cli --program-name "Acme Corp" \
@@ -94,6 +94,12 @@ Recon is skipped by default. Pass `--skip-recon=false` to run `subfinder` and `a
 
 ```bash
 ./bounty_cli --program-id <program-id> --skip-recon=false
+```
+
+Pipe root domains and run recon on them:
+
+```bash
+cat root-domains.txt | ./bounty_cli --program-name "Acme Corp" --skip-recon=false
 ```
 
 ### Skip port scanning

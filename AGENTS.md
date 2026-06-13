@@ -83,7 +83,7 @@ export INTIGRITI_TOKEN="your_token_here"
 **Flags:**
 - `--program-id`: Target Intigriti program ID.
 - `--target`: Direct target domain or wildcard (skips Intigriti API).
-- `--fqdn`: Explicit FQDN to scan (repeatable; comma-separated values also accepted). Pass `-` or pipe FQDNs via stdin (one per line). Skips Intigriti API and recon. Requires `--program-name`.
+- `--fqdn`: Explicit FQDN to scan (repeatable; comma-separated values also accepted). Pass `-` or pipe FQDNs via stdin (one per line). Skips Intigriti API. Requires `--program-name`. By default recon is skipped; pass `--skip-recon=false` to run subdomain discovery on the provided FQDNs.
 - `--program-name`: Program name used for report filenames when scanning with `--fqdn`.
 - `--db`: Custom database filename (default: `bounty.db`).
 - `--skip-recon`: Set true (default) to bypass active/passive subdomain discovery phases.
@@ -110,6 +110,11 @@ Pipe a large asset list from another command or file:
 cat assets.txt | ./bounty_cli --program-name "Acme Corp"
 subfinder -d example.com -silent | ./bounty_cli --program-name "Acme Corp"
 ./bounty_cli --program-name "Acme Corp" --fqdn - < assets.txt
+```
+
+Pipe root domains and run subdomain recon (subfinder + amass) on them:
+```bash
+cat root-domains.txt | ./bounty_cli --program-name "Acme Corp" --skip-recon=false
 ```
 
 Use Claude (or any OpenAI-compatible hosted model) for LLM triage:

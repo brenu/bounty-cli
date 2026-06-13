@@ -119,12 +119,23 @@ func scopesFromFQDNs(fqdns []string) []api.Scope {
 	return scopes
 }
 
+// wildcardScope converts a scope to use wildcard matching so discovered
+// subdomains pass the scope filter. If the endpoint lacks a "*." prefix,
+// it is added. The type is set to Wildcard.
+func wildcardScope(s api.Scope) api.Scope {
+	if !strings.HasPrefix(s.Endpoint, "*.") {
+		s.Endpoint = "*." + s.Endpoint
+	}
+	s.Type = api.AssetType{Value: "Wildcard"}
+	return s
+}
+
 func main() {
 	programID := flag.String("program-id", "", "Program ID")
 	target := flag.String("target", "", "Direct target domain or wildcard (skips Intigriti)")
 	programName := flag.String("program-name", "", "Program name for reports (required with --fqdn)")
 	var fqdnFlags stringList
-	flag.Var(&fqdnFlags, "fqdn", "FQDN to scan (repeatable; use - for stdin; skips Intigriti and recon)")
+	flag.Var(&fqdnFlags, "fqdn", "FQDN to scan (repeatable; use - for stdin; skips Intigriti)")
 	dbFile := flag.String("db", "bounty.db", "Database filename")
 	skipRecon := flag.Bool("skip-recon", true, "Skip subdomain recon phase")
 	llmURL := flag.String("llm-url", "http://localhost:11434/v1", "Base URL for the OpenAI-compatible LLM endpoint")
@@ -189,6 +200,11 @@ func main() {
 		fmt.Printf("[*] Using %d explicit FQDN(s) for program: %s\n", len(fqdns), *programName)
 		reportName = *programName
 		scopes = scopesFromFQDNs(fqdns)
+		if !*skipRecon {
+			for i := range scopes {
+				scopes[i] = wildcardScope(scopes[i])
+			}
+		}
 	} else if *target != "" {
 		fmt.Printf("[*] Using direct target: %s\n", *target)
 		reportName = *target
@@ -230,12 +246,13 @@ func main() {
 	fmt.Printf("[*] Found %d initial targets\n", len(initialTargets))
 
 	var allSubdomains []string
-	if len(fqdns) > 0 {
-		fmt.Println("[*] Skipping Recon Phase (explicit FQDN list)...")
-		allSubdomains = fqdns
-	} else if *skipRecon {
+	if *skipRecon {
 		fmt.Println("[*] Skipping Recon Phase as requested...")
-		allSubdomains = initialTargets
+		if len(fqdns) > 0 {
+			allSubdomains = fqdns
+		} else {
+			allSubdomains = initialTargets
+		}
 	} else {
 		fmt.Println("[*] Starting Recon Phase...")
 		for _, target := range initialTargets {

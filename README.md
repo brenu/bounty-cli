@@ -131,6 +131,7 @@ Skip analysis and notifications entirely:
 | `--program-name` | | Program name for report filenames (required with `--fqdn`) |
 | `--db` | `bounty.db` | SQLite database filename |
 | `--skip-recon` | `true` | Skip subdomain discovery (`subfinder`, `amass`) |
+| `--concurrency` | `1` | Number of concurrent root-domain groups to process (1 = sequential). Groups targets by registered domain; each group runs at full RPS |
 | `--skip-naabu` | `false` | Skip port scan; httpx probes 80/443 directly |
 | `--skip-analysis` | `false` | Skip LLM triage and Telegram notification |
 | `--llm-url` | `http://localhost:11434/v1` | OpenAI-compatible LLM endpoint |
@@ -141,8 +142,10 @@ Skip analysis and notifications entirely:
 ## Pipeline
 
 ```
-Fetch scope → Recon (optional) → Scope filter → Port scan → Live hosts → Nuclei → Deduplicate → Report → LLM triage (optional)
+Fetch scope → Recon (optional) → Scope filter → [naabu] → [httpx] → [nuclei] → Deduplicate → Report → LLM triage (optional)
 ```
+
+With `--concurrency > 1`, the `[naabu]`, `[httpx]`, and `[nuclei]` phases each run concurrently across root-domain groups. All groups finish one phase before the next begins.
 
 1. **Scope** — Assets come from Intigriti, a `--target` wildcard, or an explicit `--fqdn` list.
 2. **Recon** — `subfinder` and `amass` discover subdomains (when enabled).

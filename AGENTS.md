@@ -88,6 +88,7 @@ export INTIGRITI_TOKEN="your_token_here"
 - `--db`: Custom database filename (default: `bounty.db`).
 - `--skip-recon`: Set true (default) to bypass active/passive subdomain discovery phases.
 - `--skip-naabu`: Skip naabu port scan; httpx will probe 80/443 directly on the filtered host list.
+- `--concurrency`: Number of concurrent root-domain groups to process (default: 1, no concurrency). Groups targets by their registered domain and processes each group independently. When >1, naabu, httpx, and nuclei each run concurrently across groups with a barrier between tools.
 - `--llm-url`: OpenAI-compatible LLM endpoint base URL (default: local Ollama).
 - `--llm-model`: Model name for LLM triage analysis.
 - `--llm-api-key`: Bearer token for authenticated LLM providers (overrides `LLM_API_KEY` env var).

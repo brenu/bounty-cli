@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/brenu/bounty-cli/internal/analyst"
 	"github.com/brenu/bounty-cli/internal/api"
 	"github.com/brenu/bounty-cli/internal/db"
+	"github.com/brenu/bounty-cli/internal/group"
+	"github.com/brenu/bounty-cli/internal/pool"
 	"github.com/brenu/bounty-cli/internal/reporter"
 	"github.com/brenu/bounty-cli/internal/scope"
 	"github.com/brenu/bounty-cli/internal/tools"
@@ -129,6 +133,7 @@ func main() {
 	notifyID := flag.String("notify-id", "tel", "notify provider ID for Telegram (matches id: in provider-config.yaml)")
 	skipAnalysis := flag.Bool("skip-analysis", false, "Skip LLM triage analysis and Telegram notification")
 	skipNaabu := flag.Bool("skip-naabu", false, "Skip naabu port scan (httpx will probe 80/443 directly)")
+	concurrency := flag.Uint("concurrency", 1, "Number of concurrent root-domain groups to process (1 = sequential)")
 	flag.Parse()
 
 	if (*programID != "" || *target != "") && (stdinIsPiped() || containsStdinFlag(fqdnFlags)) {
@@ -252,10 +257,33 @@ func main() {
 	}
 	database.SaveDomains(filtered)
 
+	// --- Group by root domain ---
+	targetGroups := group.ByRootDomain(filtered)
+	effectiveConcurrency := int(*concurrency)
+	if effectiveConcurrency < 1 {
+		effectiveConcurrency = 1
+	}
+	useConcurrency := effectiveConcurrency > 1 && len(targetGroups) > 1
+
 	fmt.Println("[*] Starting Live Host Discovery...")
 	var openPorts []string
+	var naabuResults []pool.Result
+
 	if *skipNaabu {
 		fmt.Println("[*] Skipping naabu port scan as requested (httpx will probe 80/443)...")
+	} else if useConcurrency {
+		fmt.Printf("[+] Running port scan (naabu, top 100) across %d groups (concurrency=%d)...\n", len(targetGroups), effectiveConcurrency)
+		naabuResults = pool.RunGroups(targetGroups, effectiveConcurrency, func(g group.Group) ([]string, error) {
+			return tools.RunNaabu(g.Targets, rps)
+		})
+		for _, r := range naabuResults {
+			if r.Err != nil {
+				fmt.Printf("[!] Naabu error for %s: %v\n", targetGroups[r.Index].Root, r.Err)
+			} else {
+				openPorts = append(openPorts, r.Items...)
+			}
+		}
+		fmt.Printf("[*] Found %d open ports across all groups\n", len(openPorts))
 	} else {
 		fmt.Println("[+] Running port scan (naabu, top 100)...")
 		var err error
@@ -266,27 +294,64 @@ func main() {
 		fmt.Printf("[*] Found %d open ports\n", len(openPorts))
 	}
 
-	httpxTargets := openPorts
-	if len(openPorts) == 0 {
-		httpxTargets = filtered
+	var liveHosts []string
+
+	if useConcurrency {
+		// Build httpx input per group: if naabu produced ports for a group, use those;
+		// otherwise fall back to the original subdomains for that group.
+		httpxInputGroups := make([]group.Group, len(targetGroups))
+		for i, g := range targetGroups {
+			var targets []string
+			if !*skipNaabu && i < len(naabuResults) && len(naabuResults[i].Items) > 0 {
+				targets = naabuResults[i].Items
+			} else {
+				targets = g.Targets
+			}
+			httpxInputGroups[i] = group.Group{Root: g.Root, Targets: targets}
+		}
+
+		fmt.Printf("[+] Probing live hosts (httpx) across %d groups (concurrency=%d)...\n", len(httpxInputGroups), effectiveConcurrency)
+		httpxResults := pool.RunGroups(httpxInputGroups, effectiveConcurrency, func(g group.Group) ([]string, error) {
+			return tools.RunHttpx(g.Targets, rps)
+		})
+		for _, r := range httpxResults {
+			if r.Err != nil {
+				fmt.Printf("[!] Httpx error for %s: %v\n", httpxInputGroups[r.Index].Root, r.Err)
+			} else {
+				liveHosts = append(liveHosts, r.Items...)
+			}
+		}
+		liveHosts = dedupeStrings(liveHosts)
+		fmt.Printf("[*] Found %d live hosts\n", len(liveHosts))
+	} else {
+		httpxTargets := openPorts
+		if len(openPorts) == 0 {
+			httpxTargets = filtered
+		}
+		var err error
+		liveHosts, err = tools.RunHttpx(httpxTargets, rps)
+		if err != nil {
+			fmt.Printf("[!] Httpx probe error: %v\n", err)
+		}
+		fmt.Printf("[*] Found %d live hosts\n", len(liveHosts))
 	}
-	liveHosts, err := tools.RunHttpx(httpxTargets, rps)
-	if err != nil {
-		fmt.Printf("[!] Httpx probe error: %v\n", err)
-	}
-	fmt.Printf("[*] Found %d live hosts\n", len(liveHosts))
 
 	var newFindings []db.NucleiFinding
 	allFindings := []db.NucleiFinding{}
 
 	if len(liveHosts) > 0 {
 		fmt.Println("[*] Starting Nuclei Scan...")
-		tools.RunNuclei(liveHosts, nucleiResultsFile, rps)
 
-		var err error
-		allFindings, err = reporter.ParseNucleiOutput(nucleiResultsFile)
-		if err != nil {
-			fmt.Printf("Error parsing nuclei output: %v\n", err)
+		if useConcurrency {
+			liveGroups := group.ByRootDomain(liveHosts)
+			allFindings = runNucleiConcurrent(liveGroups, effectiveConcurrency, rps)
+		} else {
+			tools.RunNuclei(liveHosts, nucleiResultsFile, rps)
+			var err error
+			allFindings, err = reporter.ParseNucleiOutput(nucleiResultsFile)
+			if err != nil {
+				fmt.Printf("Error parsing nuclei output: %v\n", err)
+			}
 		}
 
 		seenInSession := make(map[string]bool)
@@ -342,4 +407,70 @@ func main() {
 		}
 	}
 
+}
+
+// runNucleiConcurrent runs nuclei per group, each writing to a separate temp
+// JSONL file. After all groups finish, the files are parsed and merged.
+func runNucleiConcurrent(liveGroups []group.Group, concurrency int, rps uint) []db.NucleiFinding {
+	if len(liveGroups) == 0 {
+		return nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "nuclei_results_*")
+	if err != nil {
+		fmt.Printf("[!] Failed to create temp dir: %v\n", err)
+		return nil
+	}
+	defer os.RemoveAll(tmpDir)
+
+	type groupOutput struct {
+		index int
+		path  string
+		err   error
+	}
+
+	outputs := make([]groupOutput, len(liveGroups))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, concurrency)
+
+	for i, g := range liveGroups {
+		wg.Add(1)
+		go func(idx int, grp group.Group) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			outPath := filepath.Join(tmpDir, fmt.Sprintf("nuclei_%d.jsonl", idx))
+			fmt.Printf("  [nuclei] Scanning %s (%d targets)\n", grp.Root, len(grp.Targets))
+
+			if err := tools.RunNuclei(grp.Targets, outPath, rps); err != nil {
+				outputs[idx] = groupOutput{index: idx, err: err}
+				return
+			}
+			outputs[idx] = groupOutput{index: idx, path: outPath}
+		}(i, g)
+	}
+	wg.Wait()
+
+	var allFindings []db.NucleiFinding
+	allMap := make(map[string]bool) // dedup across groups
+	for _, out := range outputs {
+		if out.err != nil {
+			fmt.Printf("[!] Nuclei error for group %d: %v\n", out.index, out.err)
+			continue
+		}
+		findings, err := reporter.ParseNucleiOutput(out.path)
+		if err != nil {
+			fmt.Printf("[!] Error parsing nuclei output for group %d: %v\n", out.index, err)
+			continue
+		}
+		for _, f := range findings {
+			key := fmt.Sprintf("%s-%s", f.TemplateID, f.MatchedAt)
+			if !allMap[key] {
+				allMap[key] = true
+				allFindings = append(allFindings, f)
+			}
+		}
+	}
+	return allFindings
 }

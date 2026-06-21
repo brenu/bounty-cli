@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/brenu/bounty-cli/internal/db"
 )
 
 // ---------------------------------------------------------------------------
@@ -451,5 +453,190 @@ func TestAnalyseReport_ChunksLongOutput(t *testing.T) {
 	}
 	if callCount < 2 {
 		t.Errorf("expected multiple notify calls for long output, got %d", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// formatFindingsForLLM
+// ---------------------------------------------------------------------------
+
+func TestFormatFindingsForLLM(t *testing.T) {
+	t.Parallel()
+
+	var f1, f2 db.NucleiFinding
+	f1.TemplateID = "cve-xxx"
+	f1.MatchedAt = "https://t.example.com"
+	f1.Info.Name = "RCE"
+	f1.Info.Severity = "critical"
+	f1.Info.Description = "Remote code execution via unsanitised input"
+
+	f2.TemplateID = "sqli-err"
+	f2.MatchedAt = "https://t.example.com/search"
+	f2.Info.Name = "SQL Injection"
+	f2.Info.Severity = "high"
+
+	got := formatFindingsForLLM("example.com", []db.NucleiFinding{f1, f2})
+
+	if !strings.Contains(got, "example.com") {
+		t.Errorf("output should contain root domain, got: %q", got)
+	}
+	if !strings.Contains(got, "[CRITICAL]") {
+		t.Errorf("output should contain severity label, got: %q", got)
+	}
+	if !strings.Contains(got, "cve-xxx") {
+		t.Errorf("output should contain template ID, got: %q", got)
+	}
+	if !strings.Contains(got, "Remote code execution") {
+		t.Errorf("output should contain description, got: %q", got)
+	}
+}
+
+func TestFormatFindingsForLLM_Empty(t *testing.T) {
+	t.Parallel()
+	got := formatFindingsForLLM("empty.com", nil)
+	if !strings.Contains(got, "0") {
+		t.Errorf("empty findings should report zero count, got: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AnalyseGroupFindings — some tests mutate the package-level notifyRunner
+// and must NOT run in parallel with each other.
+// ---------------------------------------------------------------------------
+
+func TestAnalyseGroupFindings_EmptyFindings(t *testing.T) {
+	t.Parallel()
+	result, err := AnalyseGroupFindings("example.com", nil, Config{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "" {
+		t.Errorf("expected empty result, got %q", result)
+	}
+}
+
+func TestAnalyseGroupFindings_ReturnsNone(t *testing.T) {
+	srv := makeTestServer(t, "NONE", http.StatusOK)
+	defer srv.Close()
+
+	notifyCalled := false
+	orig := notifyRunner
+	defer func() { notifyRunner = orig }()
+	notifyRunner = func(_, _ string) error {
+		notifyCalled = true
+		return nil
+	}
+
+	var f db.NucleiFinding
+	f.TemplateID = "cve-xxx"
+	f.MatchedAt = "https://t.example.com"
+	f.Info.Name = "RCE"
+	f.Info.Severity = "critical"
+	cfg := Config{BaseURL: srv.URL + "/v1", Model: "test-model", NotifyID: "tel"}
+
+	result, err := AnalyseGroupFindings("example.com", []db.NucleiFinding{f}, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "" {
+		t.Errorf("expected empty result when LLM returns NONE, got %q", result)
+	}
+	if notifyCalled {
+		t.Error("notifyRunner should not be called when LLM returns NONE")
+	}
+}
+
+func TestAnalyseGroupFindings_FindingsDispatched(t *testing.T) {
+	finding := "🔴 CRITICAL | cve-xxx | https://t.example.com | RCE — remote code execution"
+	srv := makeTestServer(t, finding, http.StatusOK)
+	defer srv.Close()
+
+	var notifiedText string
+	orig := notifyRunner
+	defer func() { notifyRunner = orig }()
+	notifyRunner = func(text, providerID string) error {
+		notifiedText = text
+		if providerID != "tel" {
+			t.Errorf("expected providerID 'tel', got %q", providerID)
+		}
+		return nil
+	}
+
+	var f db.NucleiFinding
+	f.TemplateID = "cve-xxx"
+	f.MatchedAt = "https://t.example.com"
+	f.Info.Name = "RCE"
+	f.Info.Severity = "critical"
+	cfg := Config{BaseURL: srv.URL + "/v1", Model: "test-model", NotifyID: "tel"}
+
+	result, err := AnalyseGroupFindings("example.com", []db.NucleiFinding{f}, cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != finding {
+		t.Errorf("result = %q, want %q", result, finding)
+	}
+	if !strings.Contains(notifiedText, "[example.com]") {
+		t.Errorf("notification should contain group header, got: %q", notifiedText)
+	}
+	if !strings.Contains(notifiedText, "cve-xxx") {
+		t.Errorf("notification should contain finding, got: %q", notifiedText)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendFinalReport
+// ---------------------------------------------------------------------------
+
+func TestSendFinalReport(t *testing.T) {
+	var notifiedText string
+	orig := notifyRunner
+	defer func() { notifyRunner = orig }()
+	notifyRunner = func(text, providerID string) error {
+		notifiedText = text
+		if providerID != "tel" {
+			t.Errorf("expected providerID 'tel', got %q", providerID)
+		}
+		return nil
+	}
+
+	analyses := map[string]string{
+		"example.com": "🔴 CRITICAL | cve-xxx | t.example.com | RCE\n🔴 HIGH | sqli | t.example.com/search | SQLi",
+		"other.com":   "🔴 CRITICAL | ssrf | other.com | SSRF",
+	}
+
+	if err := SendFinalReport("Test Program", analyses, "tel"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(notifiedText, "Final Analysis Report") {
+		t.Errorf("should contain final report header, got: %q", notifiedText)
+	}
+	if !strings.Contains(notifiedText, "📂 example.com") {
+		t.Errorf("should contain group name, got: %q", notifiedText)
+	}
+	if !strings.Contains(notifiedText, "📂 other.com") {
+		t.Errorf("should contain second group name, got: %q", notifiedText)
+	}
+	if !strings.Contains(notifiedText, "Summary: 2 root domain(s), 3 triaged finding(s)") {
+		t.Errorf("should contain correct summary, got: %q", notifiedText)
+	}
+}
+
+func TestSendFinalReport_Empty(t *testing.T) {
+	var notifiedText string
+	orig := notifyRunner
+	defer func() { notifyRunner = orig }()
+	notifyRunner = func(text, providerID string) error {
+		notifiedText = text
+		return nil
+	}
+
+	if err := SendFinalReport("Empty Program", nil, "tel"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(notifiedText, "no findings were discovered") {
+		t.Errorf("empty report should fall back to NotifyScanComplete, got: %q", notifiedText)
 	}
 }

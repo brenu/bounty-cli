@@ -145,6 +145,7 @@ func main() {
 	skipAnalysis := flag.Bool("skip-analysis", false, "Skip LLM triage analysis and Telegram notification")
 	skipNaabu := flag.Bool("skip-naabu", false, "Skip naabu port scan (httpx will probe 80/443 directly)")
 	concurrency := flag.Uint("concurrency", 1, "Number of concurrent root-domain groups to process (1 = sequential)")
+	realtimeNotify := flag.Bool("realtime-notify", false, "Notify per root-domain group in realtime as nuclei scans complete (requires --concurrency > 1)")
 	flag.Parse()
 
 	if (*programID != "" || *target != "") && (stdinIsPiped() || containsStdinFlag(fqdnFlags)) {
@@ -282,6 +283,11 @@ func main() {
 	}
 	useConcurrency := effectiveConcurrency > 1 && len(targetGroups) > 1
 
+	if *realtimeNotify && !useConcurrency {
+		fmt.Println("Error: --realtime-notify requires --concurrency > 1 and multiple root-domain groups")
+		os.Exit(1)
+	}
+
 	fmt.Println("[*] Starting Live Host Discovery...")
 	var openPorts []string
 	var naabuResults []pool.Result
@@ -355,13 +361,75 @@ func main() {
 
 	var newFindings []db.NucleiFinding
 	allFindings := []db.NucleiFinding{}
+	var groupAnalyses map[string]string // populated only when --realtime-notify is active
 
 	if len(liveHosts) > 0 {
 		fmt.Println("[*] Starting Nuclei Scan...")
 
+		var onGroupComplete func(idx int, root string, path string)
+		if *realtimeNotify && useConcurrency {
+			apiKey := *llmAPIKey
+			if apiKey == "" {
+				apiKey = os.Getenv("LLM_API_KEY")
+			}
+			cfg := analyst.Config{
+				BaseURL:  *llmURL,
+				Model:    *llmModel,
+				APIKey:   apiKey,
+				NotifyID: *notifyID,
+			}
+
+			groupAnalyses = make(map[string]string)
+
+			var mu sync.Mutex
+			onGroupComplete = func(idx int, root string, path string) {
+				findings, err := reporter.ParseNucleiOutput(path)
+				if err != nil {
+					fmt.Printf("[!] Error parsing nuclei output for %s: %v\n", root, err)
+					return
+				}
+				if len(findings) == 0 {
+					return
+				}
+
+				// Filter & save new findings (mutex-protected to prevent SQLite locking)
+				var newOnes []db.NucleiFinding
+				mu.Lock()
+				for _, f := range findings {
+					if isNew, _ := database.IsNewFinding(&f); isNew {
+						newOnes = append(newOnes, f)
+					}
+				}
+				if len(newOnes) > 0 {
+					database.SaveFindings(newOnes)
+				}
+				mu.Unlock()
+
+				if len(newOnes) == 0 {
+					fmt.Printf("[*] %s: no new findings to triage.\n", root)
+					return
+				}
+
+				fmt.Printf("[*] %s: triaging %d new finding(s)...\n", root, len(newOnes))
+				analysis, err := analyst.AnalyseGroupFindings(root, newOnes, cfg)
+				if err != nil {
+					fmt.Printf("[!] %s: LLM triage error: %v\n", root, err)
+					return
+				}
+				if analysis == "" {
+					fmt.Printf("[*] %s: no qualifying findings after triage.\n", root)
+					return
+				}
+
+				mu.Lock()
+				groupAnalyses[root] = analysis
+				mu.Unlock()
+			}
+		}
+
 		if useConcurrency {
 			liveGroups := group.ByRootDomain(liveHosts)
-			allFindings = runNucleiConcurrent(liveGroups, effectiveConcurrency, rps)
+			allFindings = runNucleiConcurrent(liveGroups, effectiveConcurrency, rps, onGroupComplete)
 		} else {
 			tools.RunNuclei(liveHosts, nucleiResultsFile, rps)
 			var err error
@@ -390,14 +458,23 @@ func main() {
 	fmt.Printf("[*] Found %d new vulnerabilities\n", len(newFindings))
 
 	reportPath := reporter.GetUniqueReportPath("reports", reportName)
-	rep := reporter.NewReportGenerator(reportName, filtered, liveHosts, newFindings, true)
-	rep.Generate(reportPath)
+	if *realtimeNotify && useConcurrency {
+		rep := reporter.NewReportGenerator(reportName, filtered, liveHosts, allFindings, false)
+		rep.Generate(reportPath)
+	} else {
+		rep := reporter.NewReportGenerator(reportName, filtered, liveHosts, newFindings, true)
+		rep.Generate(reportPath)
+	}
 	database.SaveFindings(allFindings)
 
 	fmt.Printf("[!] Pipeline completed. Report: %s\n", reportPath)
 
 	if !*skipAnalysis {
-		if len(newFindings) == 0 {
+		if *realtimeNotify && useConcurrency {
+			if err := analyst.SendFinalReport(reportName, groupAnalyses, *notifyID); err != nil {
+				fmt.Printf("[!] Final report notification error: %v\n", err)
+			}
+		} else if len(newFindings) == 0 {
 			if err := analyst.NotifyScanComplete(reportName, *notifyID); err != nil {
 				fmt.Printf("[!] Telegram notification error: %v\n", err)
 			}
@@ -427,8 +504,11 @@ func main() {
 }
 
 // runNucleiConcurrent runs nuclei per group, each writing to a separate temp
-// JSONL file. After all groups finish, the files are parsed and merged.
-func runNucleiConcurrent(liveGroups []group.Group, concurrency int, rps uint) []db.NucleiFinding {
+// JSONL file. When onGroupComplete is non-nil, it is called after each group's
+// nuclei scan finishes (with the semaphore slot already released) so the
+// caller can process per-group results while other groups are still scanning.
+func runNucleiConcurrent(liveGroups []group.Group, concurrency int, rps uint,
+	onGroupComplete func(idx int, root string, path string)) []db.NucleiFinding {
 	if len(liveGroups) == 0 {
 		return nil
 	}
@@ -454,17 +534,23 @@ func runNucleiConcurrent(liveGroups []group.Group, concurrency int, rps uint) []
 		wg.Add(1)
 		go func(idx int, grp group.Group) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			sem <- struct{}{} // acquire slot
 
 			outPath := filepath.Join(tmpDir, fmt.Sprintf("nuclei_%d.jsonl", idx))
 			fmt.Printf("  [nuclei] Scanning %s (%d targets)\n", grp.Root, len(grp.Targets))
 
-			if err := tools.RunNuclei(grp.Targets, outPath, rps); err != nil {
+			err := tools.RunNuclei(grp.Targets, outPath, rps)
+			<-sem // release slot before callback so other groups can start
+
+			if err != nil {
 				outputs[idx] = groupOutput{index: idx, err: err}
 				return
 			}
 			outputs[idx] = groupOutput{index: idx, path: outPath}
+
+			if onGroupComplete != nil {
+				onGroupComplete(idx, grp.Root, outPath)
+			}
 		}(i, g)
 	}
 	wg.Wait()

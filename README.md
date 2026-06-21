@@ -127,6 +127,16 @@ Skip analysis and notifications entirely:
 ./bounty_cli --program-id <program-id> --skip-analysis
 ```
 
+### Real-time notifications in concurrent mode
+
+When scanning across many root domains with `--concurrency > 1`, add `--realtime-notify` to triage and send partial results to Telegram as **each root domain** finishes its nuclei scan, instead of waiting for all of them. A consolidated final report is sent when all groups complete:
+
+```bash
+./bounty_cli --program-id <program-id> --concurrency 4 --realtime-notify
+```
+
+Requires both `--concurrency > 1` and multiple root-domain groups.
+
 ## CLI flags
 
 | Flag | Default | Description |
@@ -138,6 +148,7 @@ Skip analysis and notifications entirely:
 | `--db` | `bounty.db` | SQLite database filename |
 | `--skip-recon` | `true` | Skip subdomain discovery (`subfinder`, `amass`) |
 | `--concurrency` | `1` | Number of concurrent root-domain groups to process (1 = sequential). Groups targets by registered domain; each group runs at full RPS |
+| `--realtime-notify` | `false` | When used with `--concurrency > 1`, triages and notifies each group's findings as its nuclei scan completes, then sends a consolidated final report. Requires concurrent mode |
 | `--skip-naabu` | `false` | Skip port scan; httpx probes 80/443 directly |
 | `--skip-analysis` | `false` | Skip LLM triage and Telegram notification |
 | `--llm-url` | `http://localhost:11434/v1` | OpenAI-compatible LLM endpoint |
@@ -151,7 +162,7 @@ Skip analysis and notifications entirely:
 Fetch scope → Recon (optional) → Scope filter → [naabu] → [httpx] → [nuclei] → Deduplicate → Report → LLM triage (optional)
 ```
 
-With `--concurrency > 1`, the `[naabu]`, `[httpx]`, and `[nuclei]` phases each run concurrently across root-domain groups. All groups finish one phase before the next begins.
+With `--concurrency > 1`, the `[naabu]`, `[httpx]`, and `[nuclei]` phases each run concurrently across root-domain groups. All groups finish one phase before the next begins. Add `--realtime-notify` to triage and notify each group's findings as its nuclei scan finishes, with a final consolidated Telegram report at the end.
 
 1. **Scope** — Assets come from Intigriti, a `--target` wildcard, or an explicit `--fqdn` list.
 2. **Recon** — `subfinder` and `amass` discover subdomains (when enabled).
@@ -160,7 +171,7 @@ With `--concurrency > 1`, the `[naabu]`, `[httpx]`, and `[nuclei]` phases each r
 5. **Scan** — Nuclei runs against live hosts; results are written to `nuclei_results.jsonl`.
 6. **Deduplicate** — New findings are compared against the SQLite database (`bounty.db` by default).
 7. **Report** — A Markdown report is saved under `reports/` (e.g. `ProgramName.md`, `ProgramName_v1.md`).
-8. **Triage** — An LLM reviews new findings and actionable results are sent via `notify`.
+8. **Triage** — An LLM reviews new findings and actionable results are sent via `notify`. With `--realtime-notify`, per-group results are triaged and notified as they complete, followed by a consolidated final report.
 
 ## Output
 

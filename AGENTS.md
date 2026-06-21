@@ -87,6 +87,7 @@ export INTIGRITI_TOKEN="your_token_here"
 - `--program-name`: Program name used for report filenames when scanning with `--fqdn`.
 - `--db`: Custom database filename (default: `bounty.db`).
 - `--skip-recon`: Set true (default) to bypass active/passive subdomain discovery phases.
+- `--recon-mode`: When `--skip-recon=false`, controls which scope items get recon: `wildcard` (default, only `*.domain` entries) or `domain` (wildcards + strict domain entries). URL-type scopes are always excluded.
 - `--skip-naabu`: Skip naabu port scan; httpx will probe 80/443 directly on the filtered host list.
 - `--concurrency`: Number of concurrent root-domain groups to process (default: 1, no concurrency). Groups targets by their registered domain and processes each group independently. When >1, naabu, httpx, and nuclei each run concurrently across groups with a barrier between tools.
 - `--realtime-notify`: When used with `--concurrency > 1`, triages and notifies each group's findings as its nuclei scan completes, then sends a consolidated final report. Requires concurrent mode.

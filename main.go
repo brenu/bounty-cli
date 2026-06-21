@@ -138,6 +138,7 @@ func main() {
 	flag.Var(&fqdnFlags, "fqdn", "FQDN to scan (repeatable; use - for stdin; skips Intigriti)")
 	dbFile := flag.String("db", "bounty.db", "Database filename")
 	skipRecon := flag.Bool("skip-recon", true, "Skip subdomain recon phase")
+	reconMode := flag.String("recon-mode", "wildcard", "Scope types for subdomain recon: wildcard (only wildcards) or domain (wildcards + strict domains)")
 	llmURL := flag.String("llm-url", "http://localhost:11434/v1", "Base URL for the OpenAI-compatible LLM endpoint")
 	llmModel := flag.String("llm-model", "hf.co/bartowski/gemma-4-e4b-it-GGUF:Q4_K_M", "LLM model name")
 	llmAPIKey := flag.String("llm-api-key", "", "Bearer token for the LLM API (overrides LLM_API_KEY env var)")
@@ -179,6 +180,11 @@ func main() {
 	}
 	if len(fqdns) > 0 && *programName == "" {
 		fmt.Println("Error: --program-name is required when using --fqdn")
+		os.Exit(1)
+	}
+
+	if *reconMode != "wildcard" && *reconMode != "domain" {
+		fmt.Printf("Error: invalid --recon-mode %q (valid: wildcard, domain)\n", *reconMode)
 		os.Exit(1)
 	}
 
@@ -256,13 +262,18 @@ func main() {
 		}
 	} else {
 		fmt.Println("[*] Starting Recon Phase...")
-		for _, target := range initialTargets {
-			fmt.Printf("[+] Running recon on: %s\n", target)
-			if subs, err := tools.RunSubfinder(target); err == nil {
-				allSubdomains = append(allSubdomains, subs...)
-			}
-			if subs, err := tools.RunAmass(target); err == nil {
-				allSubdomains = append(allSubdomains, subs...)
+		reconTargets := scopeManager.GetReconTargets(*reconMode)
+		if len(reconTargets) == 0 {
+			fmt.Printf("[*] No scope items eligible for recon with mode %q, skipping recon phase.\n", *reconMode)
+		} else {
+			for _, target := range reconTargets {
+				fmt.Printf("[+] Running recon on: %s\n", target)
+				if subs, err := tools.RunSubfinder(target); err == nil {
+					allSubdomains = append(allSubdomains, subs...)
+				}
+				if subs, err := tools.RunAmass(target); err == nil {
+					allSubdomains = append(allSubdomains, subs...)
+				}
 			}
 		}
 	}
@@ -275,16 +286,25 @@ func main() {
 	}
 	database.SaveDomains(filtered)
 
-	// --- Group by root domain ---
+	// --- Count unique root domains from the initial targets (what the user
+	// configured), not from the post-recon filtered list.  The latter can have
+	// only one root domain even when multiple were configured — if recon or
+	// scope filtering reduced everything to one registered domain — leaving the
+	// user with a confusing error despite having set multiple root domains.
 	targetGroups := group.ByRootDomain(filtered)
+	initialRoots := make(map[string]int)
+	for _, t := range initialTargets {
+		initialRoots[group.ExtractRoot(t)]++
+	}
 	effectiveConcurrency := int(*concurrency)
 	if effectiveConcurrency < 1 {
 		effectiveConcurrency = 1
 	}
-	useConcurrency := effectiveConcurrency > 1 && len(targetGroups) > 1
+	useConcurrency := effectiveConcurrency > 1 && len(initialRoots) > 1
 
 	if *realtimeNotify && !useConcurrency {
-		fmt.Println("Error: --realtime-notify requires --concurrency > 1 and multiple root-domain groups")
+		fmt.Printf("Error: --realtime-notify requires --concurrency > 1 and multiple root-domain groups (concurrency=%d, root-domains=%d)\n",
+			effectiveConcurrency, len(initialRoots))
 		os.Exit(1)
 	}
 

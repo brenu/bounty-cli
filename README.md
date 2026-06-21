@@ -90,10 +90,16 @@ Lines starting with `#` and blank lines are ignored. Comma-separated values on a
 
 ### Enable subdomain recon
 
-Recon is skipped by default. Pass `--skip-recon=false` to run `subfinder` and `amass` on each initial target:
+Recon is skipped by default. Pass `--skip-recon=false` to run `subfinder` and `amass` on each eligible initial target:
 
 ```bash
 ./bounty_cli --program-id <program-id> --skip-recon=false
+```
+
+By default, recon only runs on wildcard scope items (`*.example.com`). Use `--recon-mode domain` to also include strict domain scopes. URL-type scopes are always excluded from recon.
+
+```bash
+./bounty_cli --program-id <program-id> --skip-recon=false --recon-mode domain
 ```
 
 Pipe root domains and run recon on them:
@@ -147,6 +153,7 @@ Requires both `--concurrency > 1` and multiple root-domain groups.
 | `--program-name` | | Program name for report filenames (required with `--fqdn`) |
 | `--db` | `bounty.db` | SQLite database filename |
 | `--skip-recon` | `true` | Skip subdomain discovery (`subfinder`, `amass`) |
+| `--recon-mode` | `wildcard` | Scope types for recon when `--skip-recon=false`: `wildcard` (only wildcards) or `domain` (wildcards + strict domains). URL-type scopes excluded in both modes |
 | `--concurrency` | `1` | Number of concurrent root-domain groups to process (1 = sequential). Groups targets by registered domain; each group runs at full RPS |
 | `--realtime-notify` | `false` | When used with `--concurrency > 1`, triages and notifies each group's findings as its nuclei scan completes, then sends a consolidated final report. Requires concurrent mode |
 | `--skip-naabu` | `false` | Skip port scan; httpx probes 80/443 directly |

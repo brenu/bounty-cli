@@ -69,7 +69,7 @@ Skip the Intigriti API and treat a domain or wildcard as in scope:
 
 ### Scan explicit FQDNs
 
-Provide a fixed list of hosts. This skips Intigriti and recon entirely:
+Provide a fixed list of hosts. This skips Intigriti. Recon is skipped by default but can be enabled with `--skip-recon=false`:
 
 ```bash
 ./bounty_cli --program-name "Acme Corp" \
@@ -90,10 +90,22 @@ Lines starting with `#` and blank lines are ignored. Comma-separated values on a
 
 ### Enable subdomain recon
 
-Recon is skipped by default. Pass `--skip-recon=false` to run `subfinder` and `amass` on each initial target:
+Recon is skipped by default. Pass `--skip-recon=false` to run `subfinder` and `amass` on each eligible initial target:
 
 ```bash
 ./bounty_cli --program-id <program-id> --skip-recon=false
+```
+
+By default, recon only runs on wildcard scope items (`*.example.com`). Use `--recon-mode domain` to also include strict domain scopes. URL-type scopes are always excluded from recon.
+
+```bash
+./bounty_cli --program-id <program-id> --skip-recon=false --recon-mode domain
+```
+
+Pipe root domains and run recon on them:
+
+```bash
+cat root-domains.txt | ./bounty_cli --program-name "Acme Corp" --skip-recon=false
 ```
 
 ### Skip port scanning
@@ -121,6 +133,16 @@ Skip analysis and notifications entirely:
 ./bounty_cli --program-id <program-id> --skip-analysis
 ```
 
+### Real-time notifications in concurrent mode
+
+When scanning across many root domains with `--concurrency > 1`, add `--realtime-notify` to triage and send partial results to Telegram as **each root domain** finishes its nuclei scan, instead of waiting for all of them. A consolidated final report is sent when all groups complete:
+
+```bash
+./bounty_cli --program-id <program-id> --concurrency 4 --realtime-notify
+```
+
+Requires both `--concurrency > 1` and multiple root-domain groups.
+
 ## CLI flags
 
 | Flag | Default | Description |
@@ -131,6 +153,9 @@ Skip analysis and notifications entirely:
 | `--program-name` | | Program name for report filenames (required with `--fqdn`) |
 | `--db` | `bounty.db` | SQLite database filename |
 | `--skip-recon` | `true` | Skip subdomain discovery (`subfinder`, `amass`) |
+| `--recon-mode` | `wildcard` | Scope types for recon when `--skip-recon=false`: `wildcard` (only wildcards) or `domain` (wildcards + strict domains). URL-type scopes excluded in both modes |
+| `--concurrency` | `1` | Number of concurrent root-domain groups to process (1 = sequential). Groups targets by registered domain; each group runs at full RPS |
+| `--realtime-notify` | `false` | When used with `--concurrency > 1`, triages and notifies each group's findings as its nuclei scan completes, then sends a consolidated final report. Requires concurrent mode |
 | `--skip-naabu` | `false` | Skip port scan; httpx probes 80/443 directly |
 | `--skip-analysis` | `false` | Skip LLM triage and Telegram notification |
 | `--llm-url` | `http://localhost:11434/v1` | OpenAI-compatible LLM endpoint |
@@ -141,8 +166,10 @@ Skip analysis and notifications entirely:
 ## Pipeline
 
 ```
-Fetch scope → Recon (optional) → Scope filter → Port scan → Live hosts → Nuclei → Deduplicate → Report → LLM triage (optional)
+Fetch scope → Recon (optional) → Scope filter → [naabu] → [httpx] → [nuclei] → Deduplicate → Report → LLM triage (optional)
 ```
+
+With `--concurrency > 1`, the `[naabu]`, `[httpx]`, and `[nuclei]` phases each run concurrently across root-domain groups. All groups finish one phase before the next begins. Add `--realtime-notify` to triage and notify each group's findings as its nuclei scan finishes, with a final consolidated Telegram report at the end.
 
 1. **Scope** — Assets come from Intigriti, a `--target` wildcard, or an explicit `--fqdn` list.
 2. **Recon** — `subfinder` and `amass` discover subdomains (when enabled).
@@ -151,7 +178,7 @@ Fetch scope → Recon (optional) → Scope filter → Port scan → Live hosts �
 5. **Scan** — Nuclei runs against live hosts; results are written to `nuclei_results.jsonl`.
 6. **Deduplicate** — New findings are compared against the SQLite database (`bounty.db` by default).
 7. **Report** — A Markdown report is saved under `reports/` (e.g. `ProgramName.md`, `ProgramName_v1.md`).
-8. **Triage** — An LLM reviews new findings and actionable results are sent via `notify`.
+8. **Triage** — An LLM reviews new findings and actionable results are sent via `notify`. With `--realtime-notify`, per-group results are triaged and notified as they complete, followed by a consolidated final report.
 
 ## Output
 

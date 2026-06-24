@@ -71,3 +71,27 @@ func (sm *ScopeManager) GetInitialTargets() []string {
 	}
 	return targets
 }
+
+// GetReconTargets returns scope endpoints suitable for subdomain recon,
+// filtered by the given mode:
+//   - "wildcard" — only Wildcard-type scopes (e.g. *.example.com → example.com)
+//   - "domain"   — Wildcard + Domain-type scopes
+//
+// Url-type scopes are never included — subdomain enumeration tools expect
+// a domain name, not a full URL.
+func (sm *ScopeManager) GetReconTargets(mode string) []string {
+	var targets []string
+	for _, s := range sm.inScope {
+		switch mode {
+		case "domain":
+			if s.Type.Value == "Domain" || s.Type.Value == "Wildcard" {
+				targets = append(targets, strings.TrimPrefix(s.Endpoint, "*."))
+			}
+		default: // "wildcard"
+			if s.Type.Value == "Wildcard" {
+				targets = append(targets, strings.TrimPrefix(s.Endpoint, "*."))
+			}
+		}
+	}
+	return targets
+}

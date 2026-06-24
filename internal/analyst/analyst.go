@@ -9,8 +9,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/brenu/bounty-cli/internal/db"
 )
 
 const (
@@ -154,6 +157,93 @@ func AnalyseReport(reportPath string, cfg Config) error {
 
 	fmt.Printf("[*] LLM triage complete. Dispatching findings to Telegram (provider: %q)...\n", cfg.NotifyID)
 	return sendViaNotify(analysis, cfg.NotifyID)
+}
+
+// AnalyseGroupFindings formats a single root-domain group's findings for the LLM,
+// dispatches qualifying ones to Telegram, and returns the LLM's analysis text
+// (or "" if the LLM returned NONE / findings were empty).
+func AnalyseGroupFindings(rootDomain string, findings []db.NucleiFinding, cfg Config) (string, error) {
+	if len(findings) == 0 {
+		return "", nil
+	}
+
+	reportContent := formatFindingsForLLM(rootDomain, findings)
+
+	fmt.Printf("[*] Querying LLM (%s) for group %s...\n", cfg.Model, rootDomain)
+	result, err := queryLLM(cfg, reportContent)
+	if err != nil {
+		return "", fmt.Errorf("analyst: LLM query for group %s failed: %w", rootDomain, err)
+	}
+
+	logReasoning(result.Reasoning)
+
+	analysis := strings.TrimSpace(result.Content)
+	if strings.EqualFold(analysis, "NONE") || analysis == "" {
+		fmt.Printf("[*] LLM triage for group %s — no actionable findings.\n", rootDomain)
+		return "", nil
+	}
+
+	header := fmt.Sprintf("🔍 Partial findings for [%s]:\n\n", rootDomain)
+	if err := sendViaNotify(header+analysis, cfg.NotifyID); err != nil {
+		return "", fmt.Errorf("analyst: Telegram notify for group %s: %w", rootDomain, err)
+	}
+	return analysis, nil
+}
+
+// formatFindingsForLLM converts a slice of findings into a simple text block
+// suitable for the LLM triage prompt.
+func formatFindingsForLLM(rootDomain string, findings []db.NucleiFinding) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Root Domain: %s\n", rootDomain))
+	sb.WriteString(fmt.Sprintf("Findings: %d\n\n", len(findings)))
+	for _, f := range findings {
+		sb.WriteString(fmt.Sprintf("- [%s] %s | %s | %s\n",
+			strings.ToUpper(f.Info.Severity), f.TemplateID, f.MatchedAt, f.Info.Name))
+		if f.Info.Description != "" {
+			desc := strings.ReplaceAll(f.Info.Description, "\n", " ")
+			sb.WriteString(fmt.Sprintf("  Description: %s\n", desc))
+		}
+	}
+	return sb.String()
+}
+
+// SendFinalReport sends a consolidated final report to Telegram aggregating
+// all per-group LLM triage results. If no groups produced findings, it falls
+// back to NotifyScanComplete.
+func SendFinalReport(programName string, groupAnalyses map[string]string, providerID string) error {
+	if len(groupAnalyses) == 0 {
+		return NotifyScanComplete(programName, providerID)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🏁 Final Analysis Report — %s\n\n", programName))
+
+	totalLines := 0
+	// Sort root domains for stable output
+	roots := make([]string, 0, len(groupAnalyses))
+	for r := range groupAnalyses {
+		roots = append(roots, r)
+	}
+	sort.Strings(roots)
+
+	for _, root := range roots {
+		analysis := groupAnalyses[root]
+		nonEmptyLines := 0
+		for _, line := range strings.Split(strings.TrimSpace(analysis), "\n") {
+			if strings.TrimSpace(line) != "" {
+				nonEmptyLines++
+			}
+		}
+		totalLines += nonEmptyLines
+		sb.WriteString(fmt.Sprintf("📂 %s\n", root))
+		sb.WriteString(analysis)
+		sb.WriteString("\n\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("---\nSummary: %d root domain(s), %d triaged finding(s).\n",
+		len(groupAnalyses), totalLines))
+
+	return sendViaNotify(sb.String(), providerID)
 }
 
 // queryLLM sends the report content to the OpenAI-compatible /v1/chat/completions

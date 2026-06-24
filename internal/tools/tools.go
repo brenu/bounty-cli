@@ -99,6 +99,8 @@ func RunNuclei(targets []string, outputFile string, rps uint) error {
 		"-rl", fmt.Sprintf("%d", rps),
 		"-severity", "medium,high,critical",
 		"-timeout", "5",
+		"-retries", "1",
+		"-max-host-error", "50",
 	)
 	cmd.Stdin = strings.NewReader(strings.Join(targets, "\n"))
 	_, err := cmd.Output()

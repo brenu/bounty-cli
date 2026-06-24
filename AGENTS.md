@@ -83,15 +83,19 @@ export INTIGRITI_TOKEN="your_token_here"
 **Flags:**
 - `--program-id`: Target Intigriti program ID.
 - `--target`: Direct target domain or wildcard (skips Intigriti API).
-- `--fqdn`: Explicit FQDN to scan (repeatable; comma-separated values also accepted). Pass `-` or pipe FQDNs via stdin (one per line). Skips Intigriti API and recon. Requires `--program-name`.
+- `--fqdn`: Explicit FQDN to scan (repeatable; comma-separated values also accepted). Pass `-` or pipe FQDNs via stdin (one per line). Skips Intigriti API. Requires `--program-name`. By default recon is skipped; pass `--skip-recon=false` to run subdomain discovery on the provided FQDNs.
 - `--program-name`: Program name used for report filenames when scanning with `--fqdn`.
 - `--db`: Custom database filename (default: `bounty.db`).
 - `--skip-recon`: Set true (default) to bypass active/passive subdomain discovery phases.
+- `--recon-mode`: When `--skip-recon=false`, controls which scope items get recon: `wildcard` (default, only `*.domain` entries) or `domain` (wildcards + strict domain entries). URL-type scopes are always excluded.
 - `--skip-naabu`: Skip naabu port scan; httpx will probe 80/443 directly on the filtered host list.
+- `--concurrency`: Number of concurrent root-domain groups to process (default: 1, no concurrency). Groups targets by their registered domain and processes each group independently. When >1, naabu, httpx, and nuclei each run concurrently across groups with a barrier between tools.
+- `--realtime-notify`: When used with `--concurrency > 1`, triages and notifies each group's findings as its nuclei scan completes, then sends a consolidated final report. Requires concurrent mode.
 - `--llm-url`: OpenAI-compatible LLM endpoint base URL (default: local Ollama).
 - `--llm-model`: Model name for LLM triage analysis.
 - `--llm-api-key`: Bearer token for authenticated LLM providers (overrides `LLM_API_KEY` env var).
 - `--skip-analysis`: Skip LLM triage analysis and Telegram notification.
+- `--notify-id`: Notify provider ID for Telegram (matches `id:` in `provider-config.yaml`; default: `tel`).
 
 > [!NOTE]
 > Reports are automatically generated in the `reports/` folder, named after the program, with automatic versioning (e.g., `ProgramName.md`, `ProgramName_v1.md`, etc.).
@@ -109,6 +113,11 @@ Pipe a large asset list from another command or file:
 cat assets.txt | ./bounty_cli --program-name "Acme Corp"
 subfinder -d example.com -silent | ./bounty_cli --program-name "Acme Corp"
 ./bounty_cli --program-name "Acme Corp" --fqdn - < assets.txt
+```
+
+Pipe root domains and run subdomain recon (subfinder + amass) on them:
+```bash
+cat root-domains.txt | ./bounty_cli --program-name "Acme Corp" --skip-recon=false
 ```
 
 Use Claude (or any OpenAI-compatible hosted model) for LLM triage:
